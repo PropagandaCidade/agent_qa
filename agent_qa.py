@@ -1,29 +1,43 @@
-# agent_qa.py - VERSÃO 1.0 - AGENTE DE AUDITORIA FONÉTICA
-# LOCAL: Railway (Python Agent)
-# DESCRIÇÃO: Ouve o áudio, compara com o texto original e sugere melhorias nas Skills.
+# agent_qa.py - VERSÃO 1.1 - AGENTE DE AUDITORIA (RESILIENTE)
+# LOCAL: Railway
 
 import os
 import requests
 import mysql.connector
 from flask import Flask, request, jsonify
 from openai import OpenAI
+import logging
+
+# Configuração de logs para você ver o erro no Railway
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# 1. CONFIGURAÇÕES
-# Recomenda-se preencher via Variáveis de Ambiente no Railway
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-
+# Função segura para pegar o banco
 def get_db_connection():
-    return mysql.connector.connect(
-        host=os.environ.get("DB_HOST"),
-        user=os.environ.get("DB_USER"),
-        password=os.environ.get("DB_PASS"),
-        database=os.environ.get("DB_NAME")
-    )
+    try:
+        return mysql.connector.connect(
+            host=os.environ.get("DB_HOST"),
+            user=os.environ.get("DB_USER"),
+            password=os.environ.get("DB_PASS"),
+            database=os.environ.get("DB_NAME"),
+            connect_timeout=10 # Não deixa o app travar se o banco demorar
+        )
+    except Exception as e:
+        logger.error(f"Falha na conexão com o Banco de Dados: {e}")
+        return None
+
+@app.route('/')
+def home():
+    return "Agente QA está online e aguardando chamadas do PHP."
 
 @app.route('/analyze', methods=['POST'])
 def analyze_report():
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return jsonify({"error": "OPENAI_API_KEY não configurada no Railway"}), 500
+
     data = request.get_json()
     report_id = data.get('report_id')
 
@@ -31,10 +45,13 @@ def analyze_report():
         return jsonify({"error": "Report ID ausente"}), 400
 
     conn = get_db_connection()
+    if conn is None:
+        return jsonify({"error": "Não foi possível conectar ao banco da Hostinger. Verifique o IP Remoto."}), 500
+    
     cursor = conn.cursor(dictionary=True)
 
     try:
-        # 2. BUSCA DADOS DO REPORTE E DO ÁUDIO
+        # Busca dados do reporte
         query = """
             SELECT r.*, m.filename, m.text_content, m.origin_interface 
             FROM audio_error_reports r
@@ -45,73 +62,70 @@ def analyze_report():
         report = cursor.fetchone()
 
         if not report:
-            return jsonify({"error": "Reporte não encontrado"}), 404
+            return jsonify({"error": "Reporte não encontrado no banco"}), 404
 
-        # Atualiza status para 'analyzing'
-        cursor.execute("UPDATE audio_error_reports SET status = 'analyzing' WHERE id = %s", (report_id,))
-        conn.commit()
-
-        # 3. BAIXA O ÁUDIO DA HOSTINGER
-        # Ajuste a URL para o caminho público do seu áudio
-        folder = 'history' if report['origin_interface'] != 'studio' else 'audio_editor'
-        audio_url = f"https://seusite.com.br/assets/audio/{folder}/{report['filename']}"
-        audio_path = f"/tmp/{report['filename']}"
+        # Inicia Auditoria
+        client = OpenAI(api_key=api_key)
         
-        response = requests.get(audio_url)
-        with open(audio_path, 'wb') as f:
-            f.write(response.content)
+        # Pasta correta do áudio
+        folder = 'history' if report['origin_interface'] != 'studio' else 'audio_editor'
+        audio_url = f"https://propagandacidadeaudio.com.br/voice-hub/assets/audio/{folder}/{report['filename']}"
+        
+        logger.info(f"Analisando áudio: {audio_url}")
 
-        # 4. TRANSCRIÇÃO (Whisper) - O Agente "Ouve"
-        audio_file = open(audio_path, "rb")
-        transcription = client.audio.transcriptions.create(
-            model="whisper-1", 
-            file=audio_file,
-            language="pt"
-        )
+        # Download do áudio
+        audio_res = requests.get(audio_url)
+        if audio_res.status_code != 200:
+            raise Exception(f"Não consegui baixar o áudio da Hostinger. Status: {audio_res.status_code}")
+
+        audio_path = f"/tmp/{report['filename']}"
+        with open(audio_path, 'wb') as f:
+            f.write(audio_res.content)
+
+        # Whisper (Ouvir)
+        with open(audio_path, "rb") as audio_file:
+            transcription = client.audio.transcriptions.create(
+                model="whisper-1", 
+                file=audio_file,
+                language="pt"
+            )
+        
         text_heard = transcription.text
 
-        # 5. DIAGNÓSTICO (GPT-4o Audio) - O Agente "Compara e Pensa"
-        # Comparamos o que foi ouvido com o texto que a Skill gerou
+        # GPT-4o (Diagnosticar)
         prompt_analise = f"""
-        Você é um auditor de fonética de IA. 
-        Texto original enviado: "{report['text_content']}"
-        O que a IA falou (transcrição): "{text_heard}"
-        Comentário do usuário: "{report['user_comment']}"
-
-        Analise se a IA errou a pronúncia, se ignorou alguma regra de preço (ex: falou 'reais' quando devia omitir) 
-        ou se a pontuação está ruim. 
-        Retorne um diagnóstico curto e uma sugestão de regra para o arquivo de Skills (Regex ou Dicionário).
+        Você é um auditor de fonética.
+        Texto esperado: "{report['text_content']}"
+        O que a voz falou: "{text_heard}"
+        Erro relatado pelo usuário: "{report['user_comment']}"
+        
+        Compare e diga por que houve o erro e como ajustar a Skill fonética (Ex: sugerir pronúncia correta).
         """
 
         completion = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "system", "content": "Seja um técnico em fonética e publicidade."},
+            messages=[{"role": "system", "content": "Analista de áudio publicitário."},
                       {"role": "user", "content": prompt_analise}]
         )
         
         diagnosis = completion.choices[0].message.content
 
-        # 6. ATUALIZA O BANCO NA HOSTINGER
-        update_query = """
-            UPDATE audio_error_reports 
-            SET agent_transcription = %s, agent_diagnosis = %s, status = 'completed'
-            WHERE id = %s
-        """
-        cursor.execute(update_query, (text_heard, diagnosis, report_id))
+        # Salva resultado
+        update_sql = "UPDATE audio_error_reports SET agent_transcription = %s, agent_diagnosis = %s, status = 'completed' WHERE id = %s"
+        cursor.execute(update_sql, (text_heard, diagnosis, report_id))
         conn.commit()
 
-        # Limpeza
         os.remove(audio_path)
-
         return jsonify({"success": True, "diagnosis": diagnosis})
 
     except Exception as e:
-        cursor.execute("UPDATE audio_error_reports SET status = 'pending' WHERE id = %s", (report_id,))
-        conn.commit()
+        logger.error(f"Erro no processamento: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         cursor.close()
         conn.close()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)))
+    # O Railway fornece a porta via variável de ambiente
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
