@@ -1,4 +1,4 @@
-# agent_qa.py - VERSÃO 1.5 - TRUST ENV FIX
+# agent_qa.py - VERSÃO 1.6 - PROJETO ALCINDO (AUDITOR DE SKILLS)
 # LOCAL: Railway
 
 import os
@@ -6,43 +6,50 @@ import requests
 import mysql.connector
 from flask import Flask, request, jsonify
 import logging
-
-# Bibliotecas de IA e Conexão
 import httpx
 from openai import OpenAI
 
-# Configuração de logs para o painel do Railway
+# Configuração de logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# --- MANUAL DE IDENTIDADE ALCINDO (DIRETRIZES DO VOICE HUB) ---
+ALCINDO_MANUAL = """
+Você é o ALCINDO, o Auditor de Skills do Voice Hub. Sua missão é garantir que a IA narre textos publicitários com perfeição fonética.
+
+DIRETRIZES DE OURO DO VOICE HUB:
+1. REGRA DE VAREJO (MOEDAS): Em preços (Ex: R$ 10,90), a IA deve dizer "dez e noventa". É PROIBIDO falar "reais" ou "centavos", exceto se o texto for institucional/formal.
+2. REGRA DO TELEFONE: O dígito "6" deve ser pronunciado como "meia".
+3. REGRA DE ESTADOS: Siglas de estados (SP, RJ, MG, etc.) devem SEMPRE ser lidas por extenso (São Paulo, Rio de Janeiro, etc.).
+4. REGRA DE PAUSAS: Palavras em MAIÚSCULO (ex: ATENÇÃO) devem ter uma pausa (vírgula) logo após. Palavras como "Confira" devem ter reticências para suspense.
+5. REGRA DE UNIDADES: "kg" deve ser lido como "quilo", "m" pode ser "metros" ou "minutos" dependendo do contexto.
+
+SUA TAREFA:
+Compare o 'Texto Esperado' (o que a Skill enviou) com o 'Ouvido pelo Agente' (transcrição do áudio).
+Identifique onde a IA ignorou as diretrizes acima.
+"""
+
 @app.route('/')
 def home():
-    return "Agente QA Online - Versão 1.5 (Estável)"
+    return "Alcindo (Auditor de Skills) está online e vigiando."
 
 @app.route('/analyze', methods=['POST'])
 def analyze_report():
-    logger.info(">>> Recebendo solicitação de análise (POST /analyze)")
+    logger.info(">>> Alcindo iniciando auditoria...")
     
     data = request.get_json()
-    if not data:
-        return jsonify({"error": "Payload vazio"}), 400
-        
     report_id = data.get('report_id')
+
     if not report_id:
-        return jsonify({"error": "Report ID ausente"}), 400
+        return jsonify({"error": "ID do reporte ausente"}), 400
 
     api_key = os.environ.get("OPENAI_API_KEY")
     
-    # 1. INICIALIZAÇÃO DA OPENAI SEM PROXIES (SOLUÇÃO DEFINITIVA)
-    # trust_env=False ignora as variáveis HTTP_PROXY do Railway que causam o erro
-    try:
-        http_client = httpx.Client(trust_env=False)
-        client = OpenAI(api_key=api_key, http_client=http_client)
-    except Exception as e:
-        logger.error(f"Erro ao inicializar cliente OpenAI: {e}")
-        return jsonify({"error": f"Erro inicialização IA: {str(e)}"}), 500
+    # Cliente blindado contra proxies do Railway
+    http_client = httpx.Client(trust_env=False)
+    client = OpenAI(api_key=api_key, http_client=http_client)
 
     db_config = {
         'host': os.environ.get("DB_HOST"),
@@ -54,14 +61,12 @@ def analyze_report():
 
     conn = None
     try:
-        # 2. CONEXÃO COM O BANCO
-        logger.info(f"Conectando ao banco na Hostinger: {db_config['host']}")
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor(dictionary=True)
         
-        # 3. BUSCA DADOS DO REPORTE
+        # 1. Busca dados do reporte e metadados da mídia
         query = """
-            SELECT r.*, m.filename, m.text_content, m.origin_interface 
+            SELECT r.*, m.filename, m.text_content, m.origin_interface, m.voice_name
             FROM audio_error_reports r
             JOIN media_vault m ON r.media_id = m.id
             WHERE r.id = %s
@@ -70,74 +75,59 @@ def analyze_report():
         report = cursor.fetchone()
 
         if not report:
-            return jsonify({"error": "Reporte não encontrado no banco de dados"}), 404
+            return jsonify({"error": "Reporte não localizado."}), 404
 
-        # 4. DOWNLOAD DO ÁUDIO
+        # 2. Download do áudio para Alcindo ouvir
         folder = 'history' if report['origin_interface'] != 'studio' else 'audio_editor'
         audio_url = f"https://propagandacidadeaudio.com.br/voice-hub/assets/audio/{folder}/{report['filename']}"
         
-        logger.info(f"Baixando áudio: {audio_url}")
-        # Aqui também usamos timeout e ignore proxy do requests se necessário
         audio_res = requests.get(audio_url, timeout=30)
-        
-        if audio_res.status_code != 200:
-            raise Exception(f"Falha ao baixar áudio da Hostinger. Status: {audio_res.status_code}")
-
         audio_path = f"/tmp/{report['filename']}"
         with open(audio_path, 'wb') as f:
             f.write(audio_res.content)
 
-        # 5. TRANSCRIÇÃO (WHISPER)
-        logger.info("Iniciando transcrição Whisper...")
+        # 3. Transcrição Whisper (Ouvido do Alcindo)
         with open(audio_path, "rb") as audio_file:
             transcription = client.audio.transcriptions.create(
-                model="whisper-1", 
-                file=audio_file, 
-                language="pt"
+                model="whisper-1", file=audio_file, language="pt"
             )
-        
         text_heard = transcription.text
-        logger.info(f"Transcrição concluída: {text_heard}")
 
-        # 6. DIAGNÓSTICO (GPT-4o)
-        logger.info("Solicitando diagnóstico ao GPT-4o...")
-        prompt_analise = f"""
-        Você é um auditor fonético experiente.
-        
-        TEXTO ESPERADO: {report['text_content']}
-        O QUE A IA FALOU: {text_heard}
-        RECLAMAÇÃO DO USUÁRIO: {report['user_comment']}
+        # 4. Diagnóstico Alcindo (Cérebro com GPT-4o)
+        prompt_final = f"""
+        {ALCINDO_MANUAL}
 
-        Ação:
-        1. Compare os dois textos.
-        2. Aponte palavras ou siglas lidas incorretamente.
-        3. Sugira uma correção técnica (ex: trocar SP por São Paulo).
-        
-        Retorne um diagnóstico curto e profissional.
+        CASO PARA ANÁLISE:
+        - Locutor Usado: {report['voice_name']}
+        - Texto Enviado para IA: "{report['text_content']}"
+        - O que o Alcindo ouviu no áudio: "{text_heard}"
+        - O que o usuário reclamou: "{report['user_comment']}"
+
+        FORMATO DE RESPOSTA:
+        1. DIAGNÓSTICO: (Explique o que aconteceu tecnicamente)
+        2. VEREDITO: (Culpado: IA ou Culpado: Skill ausente)
+        3. SUGESTÃO DE SKILL: (Dê a regra de dicionário ou regex para o arquivo PHP)
         """
 
         completion = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "system", "content": "Auditor de voz neutro."},
-                      {"role": "user", "content": prompt_analise}]
+            messages=[{"role": "system", "content": "Você é o Alcindo, auditor técnico de áudio."},
+                      {"role": "user", "content": prompt_final}]
         )
         diagnosis = completion.choices[0].message.content
 
-        # 7. ATUALIZAÇÃO DO STATUS NO BANCO
+        # 5. Salva a auditoria no banco da Hostinger
         update_sql = "UPDATE audio_error_reports SET agent_transcription = %s, agent_diagnosis = %s, status = 'completed' WHERE id = %s"
         cursor.execute(update_sql, (text_heard, diagnosis, report_id))
         conn.commit()
 
-        logger.info(f"Sucesso! Auditoria do reporte {report_id} concluída.")
-        
-        # Limpa arquivo temporário
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
+        logger.info(f"Auditoria #{report_id} finalizada pelo Alcindo.")
+        if os.path.exists(audio_path): os.remove(audio_path)
 
-        return jsonify({"success": True, "diagnosis": diagnosis})
+        return jsonify({"success": True, "alcindo_vibe": "Auditoria concluída com sucesso"})
 
     except Exception as e:
-        logger.error(f"FALHA NO PROCESSO: {str(e)}")
+        logger.error(f"Erro no Alcindo: {str(e)}")
         return jsonify({"error": str(e)}), 500
     finally:
         if conn and conn.is_connected():
