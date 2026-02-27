@@ -1,19 +1,17 @@
-# agent_qa.py - VERSÃO 1.3 - OPENAI PROXY FIX
+# agent_qa.py - VERSÃO 1.4 - TOTAL PROXY BYPASS
 # LOCAL: Railway
 
 import os
 import requests
 import mysql.connector
 from flask import Flask, request, jsonify
-from openai import OpenAI
 import logging
 
-# IMPORTANTE: Desabilita proxies do sistema que causam erro na biblioteca OpenAI v1.0+
-os.environ['HTTP_PROXY'] = ""
-os.environ['HTTPS_PROXY'] = ""
-os.environ['http_proxy'] = ""
-os.environ['https_proxy'] = ""
+# Bibliotecas para o novo cliente blindado
+import httpx
+from openai import OpenAI
 
+# Configuração de logs
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -21,7 +19,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Agente QA Online e pronto para analisar."
+    return "Agente QA Online - Versão 1.4 (Blindada)"
 
 @app.route('/analyze', methods=['POST'])
 def analyze_report():
@@ -35,6 +33,11 @@ def analyze_report():
 
     api_key = os.environ.get("OPENAI_API_KEY")
     
+    # 1. INICIALIZAÇÃO BLINDADA DA OPENAI
+    # Criamos um cliente HTTP que ignora explicitamente qualquer proxy do sistema
+    http_client = httpx.Client(proxies={}) 
+    client = OpenAI(api_key=api_key, http_client=http_client)
+
     db_config = {
         'host': os.environ.get("DB_HOST"),
         'user': os.environ.get("DB_USER"),
@@ -44,12 +47,12 @@ def analyze_report():
     }
 
     try:
-        # 1. TESTA CONEXÃO COM O BANCO
+        # 2. CONEXÃO COM O BANCO
         logger.info(f"Conectando ao banco na Hostinger: {db_config['host']}")
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor(dictionary=True)
         
-        # 2. BUSCA DADOS DO REPORTE
+        # 3. BUSCA DADOS DO REPORTE
         query = """
             SELECT r.*, m.filename, m.text_content, m.origin_interface 
             FROM audio_error_reports r
@@ -60,17 +63,13 @@ def analyze_report():
         report = cursor.fetchone()
 
         if not report:
-            logger.error(f"Reporte {report_id} não encontrado.")
             return jsonify({"error": "Reporte não encontrado"}), 404
 
-        # 3. INICIALIZA OPENAI (Sem proxies para evitar o erro de 'proxies' argument)
-        client = OpenAI(api_key=api_key)
-        
         # 4. DOWNLOAD DO ÁUDIO
         folder = 'history' if report['origin_interface'] != 'studio' else 'audio_editor'
         audio_url = f"https://propagandacidadeaudio.com.br/voice-hub/assets/audio/{folder}/{report['filename']}"
         
-        logger.info(f"Baixando áudio para transcrição: {audio_url}")
+        logger.info(f"Baixando áudio: {audio_url}")
         audio_res = requests.get(audio_url, timeout=30)
         
         if audio_res.status_code != 200:
@@ -90,26 +89,23 @@ def analyze_report():
             )
         
         text_heard = transcription.text
-        logger.info(f"Ouvido pelo Agente: {text_heard}")
+        logger.info(f"Ouvido: {text_heard}")
 
         # 6. DIAGNÓSTICO (GPT-4o)
         logger.info("Solicitando diagnóstico ao GPT-4o...")
         prompt_analise = f"""
-        Você é um especialista em fonética e locução publicitária.
+        Você é um especialista em fonética.
         Texto Original: {report['text_content']}
-        Transcrição do Áudio: {text_heard}
-        Reclamação do Usuário: {report['user_comment']}
+        O que a voz falou: {text_heard}
+        Comentário do usuário: {report['user_comment']}
 
-        Compare o texto original com o áudio. 
-        1. Identifique palavras faladas de forma errada.
-        2. Verifique se siglas (como SP, RJ) foram lidas corretamente.
-        3. Dê uma sugestão de como ajustar o texto ou a Skill (Ex: 'Escreva São Paulo em vez de SP').
-        Retorne um diagnóstico técnico e direto.
+        Compare e identifique erros de pronúncia ou siglas (como SP lido errado).
+        Retorne um diagnóstico técnico curto e uma sugestão de correção.
         """
 
         completion = client.chat.completions.create(
             model="gpt-4o",
-            messages=[{"role": "system", "content": "Auditor de voz neutro e técnico."},
+            messages=[{"role": "system", "content": "Auditor técnico fonético."},
                       {"role": "user", "content": prompt_analise}]
         )
         diagnosis = completion.choices[0].message.content
@@ -119,7 +115,7 @@ def analyze_report():
         cursor.execute(update_sql, (text_heard, diagnosis, report_id))
         conn.commit()
 
-        logger.info(f"Sucesso! Reporte {report_id} auditado.")
+        logger.info(f"Sucesso! Reporte {report_id} finalizado.")
         
         if os.path.exists(audio_path):
             os.remove(audio_path)
@@ -127,7 +123,7 @@ def analyze_report():
         return jsonify({"success": True, "diagnosis": diagnosis})
 
     except Exception as e:
-        logger.error(f"FALHA NO PROCESSO: {str(e)}")
+        logger.error(f"ERRO CRÍTICO: {str(e)}")
         return jsonify({"error": str(e)}), 500
     finally:
         if 'conn' in locals() and conn.is_connected():
