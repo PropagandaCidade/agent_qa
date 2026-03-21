@@ -1,6 +1,6 @@
-# agent_qa.py - VERSÃO 2.3 - ALCINDO CIRÚRGICO (STRICT PROMPTING)
+# agent_qa.py - VERSÃO 2.4 - PROFILE-DRIVEN AUDITING
 # LOCAL: Railway
-# DESCRIÇÃO: Auditor Alcindo com prompt otimizado para auditoria de fonética e varejo.
+# DESCRIÇÃO: Auditor Alcindo utilizando perfil externo (alcindo_profile.json) para auditorias de alta precisão.
 
 import os
 import time
@@ -22,16 +22,17 @@ app = Flask(__name__)
 # --- CONFIGURAÇÃO ---
 BRAIN_TOKEN = "HUB_SQUAD_SECRET_2024"
 BRAIN_URL = "https://propagandacidadeaudio.com.br/voice-hub/admin/squad/brain/knowledge_bridge.php"
+PROFILE_URL = "https://propagandacidadeaudio.com.br/voice-hub/admin/squad/brain/alcindo_profile.json"
 
-def get_hub_context():
-    """Busca Regras e Memórias (RAG)"""
+def get_data_from_hub(url):
+    """Busca recursos (RAG ou Perfil) no servidor central"""
     try:
-        url = f"{BRAIN_URL}?token={BRAIN_TOKEN}"
-        resp = requests.get(url, timeout=15)
+        url_with_token = f"{url}?token={BRAIN_TOKEN}"
+        resp = requests.get(url_with_token, timeout=15)
         if resp.status_code == 200:
             return resp.json()
     except Exception as e:
-        logger.error(f"[RAG] Erro: {e}")
+        logger.error(f"[HUB] Erro ao buscar {url}: {e}")
     return None
 
 @app.route('/analyze', methods=['POST'])
@@ -57,9 +58,12 @@ def analyze_report():
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor(dictionary=True)
         
-        # 1. BUSCA CONTEXTO E DADOS
-        brain_data = get_hub_context()
+        # 1. BUSCA CONTEXTO E PERFIL
+        brain_data = get_data_from_hub(BRAIN_URL)
+        profile_data = get_data_from_hub(PROFILE_URL)
+        
         context_str = json.dumps(brain_data, ensure_ascii=False) if brain_data else "Sem contexto RAG."
+        profile_str = json.dumps(profile_data, ensure_ascii=False) if profile_data else "Sem perfil definido."
 
         query = """
             SELECT r.*, m.filename, m.text_content, m.origin_interface, m.voice_name, r.user_comment 
@@ -86,18 +90,14 @@ def analyze_report():
         transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file_obj, language="pt")
         text_heard = transcription.text
 
-        # 4. DIAGNÓSTICO GPT-4o (PROMPT CIRÚRGICO)
+        # 4. DIAGNÓSTICO GPT-4o (PROMPT BASEADO EM PERFIL)
         system_prompt = f"""
-        Você é o Alcindo, auditor sênior de fonética e conformidade de varejo.
-        Sua missão é comparar o ROTEIRO ORIGINAL com o que foi OUVIDO pelo Whisper e validar a RECLAMAÇÃO do usuário.
+        Você é o Alcindo, seguindo rigorosamente este perfil: {profile_str}.
         
-        Contexto Técnico/Dicionário: {context_str}
+        Use este contexto RAG para auditar: {context_str}
         
-        REGRAS DE ANÁLISE:
-        1. Compare o Roteiro com o Texto Ouvido.
-        2. Valide se a queixa do usuário tem fundamento técnico.
-        3. Se houver erro, classifique em: FONETICA, NEGOCIO, PONTUACAO ou OUTRO. Se o áudio estiver correto, classifique como FALSO_POSITIVO.
-        4. Retorne APENAS um JSON estrito com estas chaves: "diagnostico", "sugestao", "confianca" (0-100), "categoria".
+        SEJA CIRÚRGICO: Compare o roteiro original, o texto ouvido e a queixa do usuário.
+        Retorne APENAS JSON com as chaves: "diagnostico", "sugestao", "confianca" (0-100), "categoria".
         """
 
         user_prompt = f"""
