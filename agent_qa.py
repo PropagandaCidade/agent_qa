@@ -1,6 +1,6 @@
-# agent_qa.py - VERSÃO 2.4 - PROFILE-DRIVEN AUDITING
+# agent_qa.py - VERSÃO 2.5 - COMPLETO E INTEGRADO
 # LOCAL: Railway
-# DESCRIÇÃO: Auditor Alcindo utilizando perfil externo (alcindo_profile.json) para auditorias de alta precisão.
+# DESCRIÇÃO: Auditor Alcindo com leitura de perfil JSON, Whisper aprimorado e auditoria cética.
 
 import os
 import time
@@ -85,19 +85,24 @@ def analyze_report():
         audio_file_obj = io.BytesIO(audio_res.content)
         audio_file_obj.name = "input.mp3"
 
-        # 3. TRANSCRIÇÃO WHISPER
+        # 3. TRANSCRIÇÃO WHISPER COM PROMPT DE ROTEIRO
         client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"), http_client=httpx.Client(trust_env=False))
-        transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file_obj, language="pt")
+        transcription = client.audio.transcriptions.create(
+            model="whisper-1", 
+            file=audio_file_obj, 
+            language="pt",
+            prompt=f"Roteiro esperado: {report['text_content']}"
+        )
         text_heard = transcription.text
 
-        # 4. DIAGNÓSTICO GPT-4o (PROMPT BASEADO EM PERFIL)
+        # 4. DIAGNÓSTICO GPT-4o (LAYER DE DESCONFIANÇA)
         system_prompt = f"""
-        Você é o Alcindo, seguindo rigorosamente este perfil: {profile_str}.
+        Você é o Alcindo, auditor sênior de fonética. Seu perfil: {profile_str}.
         
-        Use este contexto RAG para auditar: {context_str}
-        
-        SEJA CIRÚRGICO: Compare o roteiro original, o texto ouvido e a queixa do usuário.
-        Retorne APENAS JSON com as chaves: "diagnostico", "sugestao", "confianca" (0-100), "categoria".
+        Você é cético. Se o usuário reclamou de um erro, assuma que o erro existe e procure-o com lupa.
+        Compare o roteiro original, o que o Whisper ouviu e a queixa do usuário.
+        Se a transcrição do áudio estiver confusa, aponte a falha na qualidade do áudio.
+        Retorne APENAS um JSON estrito com as chaves: "diagnostico", "sugestao", "confianca" (0-100), "categoria".
         """
 
         user_prompt = f"""
@@ -105,6 +110,8 @@ def analyze_report():
         - Roteiro Original: "{report['text_content']}"
         - O que o Alcindo ouviu: "{text_heard}"
         - Reclamação do Usuário: "{report['user_comment']}"
+        
+        ANÁLISE: A transcrição confirma ou contradiz a queixa? Se a transcrição estiver mal feita, ALERTE sobre a qualidade do áudio.
         """
 
         completion = client.chat.completions.create(
