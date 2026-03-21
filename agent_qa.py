@@ -1,6 +1,6 @@
-# agent_qa.py - VERSÃO 2.6 - FULL COMPARATOR
+# agent_qa.py - VERSÃO 2.7 - TYPE SAFE JSON CONVERTER
 # LOCAL: Railway
-# DESCRIÇÃO: Auditor Alcindo forçado a comparar string por string entre roteiro e áudio.
+# DESCRIÇÃO: Auditor Alcindo com conversão forçada de tipos para evitar erro de banco.
 
 import os
 import time
@@ -65,22 +65,12 @@ def analyze_report():
         audio_file_obj = io.BytesIO(audio_res.content)
         audio_file_obj.name = "input.mp3"
         
-        transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file_obj, language="pt")
+        transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file_obj, language="pt", prompt=report['text_content'])
         text_heard = transcription.text
 
-        # 4. DIAGNÓSTICO COM COMPARADOR BRUTO
-        system_prompt = f"""
-        Você é o Alcindo, auditor sênior de fonética. Perfil: {json.dumps(profile_data)}.
+        # 4. DIAGNÓSTICO
+        system_prompt = f"Você é o Alcindo. Perfil: {json.dumps(profile_data)}. Analise a reclamação do usuário comparando com o roteiro e o que foi ouvido. Retorne APENAS um JSON com chaves: 'diagnostico' (string), 'sugestao' (string), 'confianca' (int), 'categoria' (string)."
         
-        SUA MISSÃO TÉCNICA:
-        1. Liste as divergências literais entre "Roteiro Original" e "Texto Ouvido".
-        2. Se houver divergência, verifique se ela justifica a reclamação: "{report['user_comment']}".
-        3. Se não houver divergência, mas o usuário reclamou, explique se o erro é de pronúncia (FONETICA) ou interpretação.
-        4. Ocupa a chave "diagnostico" com a lista de erros encontrados.
-        
-        Retorne APENAS um JSON com: "diagnostico", "sugestao", "confianca", "categoria".
-        """
-
         completion = client.chat.completions.create(
             model="gpt-4o",
             messages=[
@@ -92,12 +82,19 @@ def analyze_report():
         
         alcindo_res = json.loads(completion.choices[0].message.content)
         
+        # FORÇA CONVERSÃO PARA STRING PARA EVITAR ERRO DE TIPO NO BANCO
+        diag_str = str(alcindo_res.get('diagnostico', 'Sem diagnostico.'))
+        sug_str = str(alcindo_res.get('sugestao', 'Manual'))
+        cat_str = str(alcindo_res.get('categoria', 'OUTRO'))
+        conf_int = int(alcindo_res.get('confianca', 0))
+        
         update_sql = "UPDATE audio_error_reports SET agent_transcription = %s, agent_diagnosis = %s, suggested_fix = %s, status = 'completed', confidence_score = %s, error_category = %s WHERE id = %s"
-        cursor.execute(update_sql, (text_heard, alcindo_res.get('diagnostico'), alcindo_res.get('sugestao'), alcindo_res.get('confianca', 0), alcindo_res.get('categoria', 'OUTRO'), report_id))
+        cursor.execute(update_sql, (text_heard, diag_str, sug_str, conf_int, cat_str, report_id))
         conn.commit()
 
         return jsonify({"success": True})
     except Exception as e:
+        logger.error(f"Erro: {str(e)}")
         return jsonify({"error": str(e)}), 500
     finally:
         if 'conn' in locals() and conn.is_connected(): cursor.close(); conn.close()
